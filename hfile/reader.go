@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log"
+	"sort"
 )
 import "encoding/binary"
 import "errors"
@@ -18,6 +20,8 @@ type Reader struct {
 	version   Version
 	header    Header
 	dataIndex DataIndex
+	cur       int
+	lastKey   *[]byte
 }
 
 func NewReader(file *os.File) (Reader, error) {
@@ -47,22 +51,56 @@ func NewReader(file *os.File) (Reader, error) {
 func (hfile *Reader) String() string {
 	return "hfile"
 }
-func getDataBlock(key []byte, blocks *[]DataBlock) (*DataBlock, error) {
-	// TODO(dan): Binary search instead.
-	for i := len(*blocks) - 1; i >= 0; i-- {
-		block := (*blocks)[i]
-		if cmp := bytes.Compare(key, block.firstKeyBytes); cmp == 0 || cmp == 1 {
-			return &block, nil
-		}
+
+func (r *Reader) blockFor(key []byte) (*DataBlock, bool) {
+	if r.lastKey != nil && bytes.Compare(key, *r.lastKey) < 0 {
+		r.dataIndex.dataBlocks[r.cur].reset()
+		r.cur = 0
 	}
-	return nil, errors.New("key not found")
+	r.lastKey = &key
+
+	if bytes.Compare(r.dataIndex.dataBlocks[r.cur].firstKeyBytes, key) >= 0 {
+		return &r.dataIndex.dataBlocks[r.cur], true
+	}
+
+	lim := len(r.dataIndex.dataBlocks) - r.cur
+	i := sort.Search(lim, func(i int) bool {
+		return bytes.Compare(r.dataIndex.dataBlocks[r.cur+i].firstKeyBytes, key) > 0
+	})
+
+	if i == 0 {
+		return nil, false
+	}
+
+	r.cur = r.cur + i - 1
+
+	r.dataIndex.dataBlocks[r.cur].reset()
+
+	return &r.dataIndex.dataBlocks[r.cur], true
 }
-func (hfile *Reader) Get(key []byte) ([]byte, error) {
-	dataBlock, err := getDataBlock(key, &hfile.dataIndex.dataBlocks)
-	if err != nil {
-		return key, err
+
+func (hfile *Reader) GetFirst(key []byte) ([]byte, bool) {
+	dataBlock, ok := hfile.blockFor(key)
+
+	if !ok {
+		log.Println("no block for key ", key)
+		return nil, false
 	}
-	return dataBlock.get(key)
+
+	value, _, found := dataBlock.get(key, true)
+	return value, found
+}
+
+func (hfile *Reader) GetAll(key []byte) [][]byte {
+	dataBlock, ok := hfile.blockFor(key)
+
+	if !ok {
+		log.Println("no block for key ", key)
+		return nil
+	}
+
+	_, found, _ := dataBlock.get(key, false)
+	return found
 }
 
 func (r *Reader) PrintDebugInfo(out io.Writer) {
@@ -197,8 +235,10 @@ type DataBlock struct {
 func (dataBlock *DataBlock) reset() {
 	dataBlock.buf.Seek(8, 0)
 }
-func (dataBlock *DataBlock) get(key []byte) ([]byte, error) {
-	dataBlock.reset()
+
+func (dataBlock *DataBlock) get(key []byte, first bool) ([]byte, [][]byte, bool) {
+	var acc [][]byte
+
 	for dataBlock.buf.Len() > 0 {
 		var keyLen, valLen uint32
 		binary.Read(dataBlock.buf, binary.BigEndian, &keyLen)
@@ -207,9 +247,17 @@ func (dataBlock *DataBlock) get(key []byte) ([]byte, error) {
 		valBytes := make([]byte, valLen)
 		dataBlock.buf.Read(keyBytes)
 		dataBlock.buf.Read(valBytes)
-		if bytes.Compare(key, keyBytes) == 0 {
-			return valBytes, nil
+		cmp := bytes.Compare(key, keyBytes)
+		if cmp == 0 {
+			if first {
+				return valBytes, acc, true
+			} else {
+				acc = append(acc, valBytes)
+			}
+		}
+		if cmp < 0 {
+			return nil, acc, false
 		}
 	}
-	return key, errors.New("key not found")
+	return nil, nil, false
 }
