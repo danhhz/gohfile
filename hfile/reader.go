@@ -61,6 +61,14 @@ func (hfile *Reader) Get(key []byte) ([]byte, error) {
 	return dataBlock.get(key)
 }
 
+func (r *Reader) PrintDebugInfo(out io.Writer) {
+	fmt.Fprintln(out, "entries: ", r.header.entryCount)
+	fmt.Fprintln(out, "blocks: ", len(r.dataIndex.dataBlocks))
+	for i, blk := range r.dataIndex.dataBlocks {
+		fmt.Fprintf(out, "\t#%d: %s (%v)\n", i, blk.firstKeyBytes, blk.firstKeyBytes)
+	}
+}
+
 type Version struct {
 	buf          *bytes.Reader
 	majorVersion uint32
